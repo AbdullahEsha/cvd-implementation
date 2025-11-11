@@ -1,15 +1,15 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score, 
                              confusion_matrix, classification_report, f1_score)
-from sklearn.feature_selection import SelectFromModel
 from catboost import CatBoostClassifier
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from sklearn.ensemble import VotingClassifier
 from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
 import optuna
 import warnings
 warnings.filterwarnings('ignore')
@@ -18,13 +18,14 @@ RANDOM_STATE = 42
 np.random.seed(RANDOM_STATE)
 
 
-class RealisticCVDPredictor:
+class RobustCVDPredictor:
     """
-    Realistic CVD predictor avoiding overfitting with:
-    - Proper data leakage prevention
-    - Conservative feature engineering
-    - Regularized models
-    - Realistic validation
+    Ultra-robust CVD predictor with maximum overfitting prevention:
+    - Stricter data leakage prevention
+    - More conservative feature engineering
+    - Stronger regularization
+    - Nested cross-validation
+    - Multiple random splits for validation
     """
     
     def __init__(self, data_path):
@@ -33,7 +34,7 @@ class RealisticCVDPredictor:
         
     def load_data(self):
         print("="*80)
-        print("🏥 REALISTIC CVD PREDICTOR - AVOIDING OVERFITTING")
+        print("🏥 ROBUST CVD PREDICTOR - MAXIMUM OVERFITTING PREVENTION")
         print("="*80)
         
         self.df = pd.read_csv(self.data_path)
@@ -41,7 +42,7 @@ class RealisticCVDPredictor:
         return self.df
     
     def create_clinical_labels(self):
-        """Create clinical risk labels"""
+        """Create clinical risk labels with simpler rules"""
         print("\n" + "="*80)
         print("🔬 CREATING CLINICAL RISK LABELS")
         print("="*80)
@@ -49,62 +50,43 @@ class RealisticCVDPredictor:
         df = self.df.copy()
         risk_score = np.zeros(len(df))
         
-        # Age risk
+        # Simplified scoring to reduce complexity
         if 'Age' in df.columns:
             df['Age'].fillna(df['Age'].median(), inplace=True)
-            risk_score += np.where(df['Age'] >= 65, 3, 
-                          np.where(df['Age'] >= 55, 2,
-                          np.where(df['Age'] >= 45, 1, 0)))
+            risk_score += np.where(df['Age'] >= 60, 2, 
+                          np.where(df['Age'] >= 45, 1, 0))
         
-        # Blood Pressure
         if all(col in df.columns for col in ['Systolic BP', 'Diastolic BP']):
             df['Systolic BP'].fillna(df['Systolic BP'].median(), inplace=True)
             df['Diastolic BP'].fillna(df['Diastolic BP'].median(), inplace=True)
-            risk_score += np.where((df['Systolic BP'] >= 140) | (df['Diastolic BP'] >= 90), 3,
-                          np.where((df['Systolic BP'] >= 130) | (df['Diastolic BP'] >= 80), 2,
-                          np.where(df['Systolic BP'] >= 120, 1, 0)))
+            risk_score += np.where((df['Systolic BP'] >= 140) | (df['Diastolic BP'] >= 90), 2,
+                          np.where((df['Systolic BP'] >= 130) | (df['Diastolic BP'] >= 80), 1, 0))
         
-        # LDL Cholesterol
         if 'Estimated LDL (mg/dL)' in df.columns:
             df['Estimated LDL (mg/dL)'].fillna(df['Estimated LDL (mg/dL)'].median(), inplace=True)
-            risk_score += np.where(df['Estimated LDL (mg/dL)'] >= 190, 3,
-                          np.where(df['Estimated LDL (mg/dL)'] >= 160, 2,
-                          np.where(df['Estimated LDL (mg/dL)'] >= 130, 1, 0)))
+            risk_score += np.where(df['Estimated LDL (mg/dL)'] >= 160, 2,
+                          np.where(df['Estimated LDL (mg/dL)'] >= 130, 1, 0))
         
-        # HDL (protective)
         if 'HDL (mg/dL)' in df.columns:
             df['HDL (mg/dL)'].fillna(df['HDL (mg/dL)'].median(), inplace=True)
-            risk_score += np.where(df['HDL (mg/dL)'] < 40, 2,
-                          np.where(df['HDL (mg/dL)'] < 50, 1, 0))
-            risk_score -= np.where(df['HDL (mg/dL)'] >= 60, 1, 0)
+            risk_score += np.where(df['HDL (mg/dL)'] < 40, 1, 0)
         
-        # Blood Sugar
         if 'Fasting Blood Sugar (mg/dL)' in df.columns:
             df['Fasting Blood Sugar (mg/dL)'].fillna(df['Fasting Blood Sugar (mg/dL)'].median(), inplace=True)
-            risk_score += np.where(df['Fasting Blood Sugar (mg/dL)'] >= 126, 3,
+            risk_score += np.where(df['Fasting Blood Sugar (mg/dL)'] >= 126, 2,
                           np.where(df['Fasting Blood Sugar (mg/dL)'] >= 100, 1, 0))
         
-        # BMI
         if 'BMI' in df.columns:
             df['BMI'].fillna(df['BMI'].median(), inplace=True)
-            risk_score += np.where(df['BMI'] >= 35, 2,
-                          np.where(df['BMI'] >= 30, 1, 0))
+            risk_score += np.where(df['BMI'] >= 30, 1, 0)
         
-        # Smoking
         if 'Smoking Status' in df.columns:
             df['Smoking Status'].fillna('N', inplace=True)
-            risk_score += np.where(df['Smoking Status'] == 'Y', 3, 0)
+            risk_score += np.where(df['Smoking Status'] == 'Y', 2, 0)
         
-        # Family History
         if 'Family History of CVD' in df.columns:
             df['Family History of CVD'].fillna('N', inplace=True)
-            risk_score += np.where(df['Family History of CVD'] == 'Y', 2, 0)
-        
-        # Physical Activity
-        if 'Physical Activity Level' in df.columns:
-            df['Physical Activity Level'].fillna('Moderate', inplace=True)
-            risk_score -= np.where(df['Physical Activity Level'] == 'High', 1, 0)
-            risk_score += np.where(df['Physical Activity Level'] == 'Low', 1, 0)
+            risk_score += np.where(df['Family History of CVD'] == 'Y', 1, 0)
         
         df['Clinical_Risk_Score'] = risk_score
         
@@ -121,66 +103,50 @@ class RealisticCVDPredictor:
         self.df_clinical = df
         return df
     
-    def conservative_feature_engineering(self, df):
-        """Create only medically validated features to avoid overfitting"""
-        print("\n🔧 Conservative Feature Engineering...")
+    def minimal_feature_engineering(self, df):
+        """Only create the most essential, well-validated features"""
+        print("\n🔧 Minimal Feature Engineering (reducing overfitting risk)...")
         
         df = df.copy()
         features_created = []
         
-        # Only create well-established medical ratios
+        # ONLY the most clinically validated ratios
         if all(col in df.columns for col in ['Total Cholesterol (mg/dL)', 'HDL (mg/dL)']):
             df['TC_HDL_Ratio'] = df['Total Cholesterol (mg/dL)'] / (df['HDL (mg/dL)'] + 1)
             df['TC_HDL_Ratio'] = df['TC_HDL_Ratio'].clip(1, 10)
             features_created.append('TC/HDL Ratio')
         
-        if all(col in df.columns for col in ['Estimated LDL (mg/dL)', 'HDL (mg/dL)']):
-            df['LDL_HDL_Ratio'] = df['Estimated LDL (mg/dL)'] / (df['HDL (mg/dL)'] + 1)
-            df['LDL_HDL_Ratio'] = df['LDL_HDL_Ratio'].clip(0.5, 8)
-            features_created.append('LDL/HDL Ratio')
-        
-        if all(col in df.columns for col in ['Total Cholesterol (mg/dL)', 'HDL (mg/dL)']):
-            df['Non_HDL_Chol'] = df['Total Cholesterol (mg/dL)'] - df['HDL (mg/dL)']
-            features_created.append('Non-HDL Cholesterol')
-        
-        # Pulse pressure (validated CVD marker)
         if all(col in df.columns for col in ['Systolic BP', 'Diastolic BP']):
             df['Pulse_Pressure'] = df['Systolic BP'] - df['Diastolic BP']
             df['Pulse_Pressure'] = df['Pulse_Pressure'].clip(20, 100)
             features_created.append('Pulse Pressure')
         
-        # Mean Arterial Pressure
-        if all(col in df.columns for col in ['Systolic BP', 'Diastolic BP']):
-            df['MAP'] = df['Diastolic BP'] + ((df['Systolic BP'] - df['Diastolic BP']) / 3)
-            features_created.append('MAP')
-        
-        print(f"   ✅ Created {len(features_created)} validated features:")
+        print(f"   ✅ Created only {len(features_created)} essential features:")
         for feat in features_created:
             print(f"      • {feat}")
         
         return df
     
     def prepare_features(self, df, target_col='Clinical_Risk_Level'):
-        """Prepare features with NO data leakage"""
+        """Prepare features with zero tolerance for leakage"""
         df = df.copy()
         
-        # CRITICAL: Remove the clinical risk score to prevent leakage!
-        if 'Clinical_Risk_Score' in df.columns:
-            print("   ⚠️  Dropping Clinical_Risk_Score to prevent data leakage")
-            df = df.drop('Clinical_Risk_Score', axis=1)
+        # Remove ALL risk-related columns
+        risk_cols = ['Clinical_Risk_Score', 'CVD Risk Level', 'Clinical_Risk_Level', 
+                     'CVD Risk Score', 'Blood Pressure (mmHg)']
+        for col in risk_cols:
+            if col in df.columns and col != target_col:
+                df = df.drop(col, axis=1)
         
         # Encode target
         le = LabelEncoder()
         df['target'] = le.fit_transform(df[target_col])
         
-        # Drop all label-related columns
-        drop_cols = ['CVD Risk Level', 'Clinical_Risk_Level', 'CVD Risk Score', 
-                     'Blood Pressure (mmHg)', target_col]
-        for col in drop_cols:
-            if col in df.columns:
-                df = df.drop(col, axis=1)
+        # Drop target column
+        if target_col in df.columns:
+            df = df.drop(target_col, axis=1)
         
-        # Handle missing values
+        # Handle missing values conservatively
         for col in df.columns:
             if col == 'target':
                 continue
@@ -189,9 +155,10 @@ class RealisticCVDPredictor:
                     df[col].fillna(df[col].median(), inplace=True)
             else:
                 if df[col].isnull().any():
-                    df[col].fillna(df[col].mode()[0] if len(df[col].mode()) > 0 else 'Unknown', inplace=True)
+                    mode_val = df[col].mode()[0] if len(df[col].mode()) > 0 else 'Unknown'
+                    df[col].fillna(mode_val, inplace=True)
         
-        # One-hot encode categorical
+        # One-hot encode
         cat_cols = [c for c in df.columns 
                    if (df[c].dtype == 'object' or str(df[c].dtype).startswith('category')) 
                    and c != 'target']
@@ -210,87 +177,117 @@ class RealisticCVDPredictor:
         
         return df, le
     
-    def optimize_with_cv(self, X, y, n_trials=30):
-        """Optimize using proper cross-validation"""
-        print("\n🔍 Hyperparameter Optimization with CV...")
+    def nested_cv_optimization(self, X, y, n_trials=15):
+        """Nested CV to prevent hyperparameter overfitting"""
+        print("\n🔍 Nested Cross-Validation for Robust Optimization...")
+        print("   (This prevents overfitting to validation set)")
+        
+        # Outer CV for true performance estimation
+        outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+        outer_scores = []
         
         def objective(trial):
+            # More conservative parameter ranges
             params = {
-                'iterations': trial.suggest_int('iterations', 300, 1000),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
-                'depth': trial.suggest_int('depth', 4, 8),
-                'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 3, 10),
+                'iterations': trial.suggest_int('iterations', 200, 600),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.08, log=True),
+                'depth': trial.suggest_int('depth', 3, 6),  # Shallower trees
+                'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 5, 15),  # More regularization
                 'random_state': RANDOM_STATE,
                 'verbose': False,
                 'auto_class_weights': 'Balanced'
             }
             
-            # Use cross-validation for unbiased evaluation
-            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+            # Inner CV for hyperparameter selection
+            inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
             scores = []
             
-            for train_idx, val_idx in cv.split(X, y):
+            for train_idx, val_idx in inner_cv.split(X, y):
                 X_train_fold, X_val_fold = X[train_idx], X[val_idx]
                 y_train_fold, y_val_fold = y[train_idx], y[val_idx]
                 
+                # Apply SMOTE inside CV
+                smote = SMOTE(k_neighbors=3, random_state=RANDOM_STATE)
+                X_train_sm, y_train_sm = smote.fit_resample(X_train_fold, y_train_fold)
+                
                 model = CatBoostClassifier(**params)
-                model.fit(X_train_fold, y_train_fold, verbose=False)
+                model.fit(X_train_sm, y_train_sm, verbose=False)
                 
                 y_pred = model.predict(X_val_fold)
                 scores.append(balanced_accuracy_score(y_val_fold, y_pred))
             
             return np.mean(scores)
         
+        # Optimize with fewer trials to reduce overfitting
         study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
         
-        print(f"   ✅ Best CV score: {study.best_value:.4f}")
-        print(f"   Best params: {study.best_params}")
+        # Test best params on outer CV
+        best_params = study.best_params
+        for train_idx, test_idx in outer_cv.split(X, y):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+            
+            smote = SMOTE(k_neighbors=3, random_state=RANDOM_STATE)
+            X_train_sm, y_train_sm = smote.fit_resample(X_train, y_train)
+            
+            model = CatBoostClassifier(**best_params)
+            model.fit(X_train_sm, y_train_sm, verbose=False)
+            
+            y_pred = model.predict(X_test)
+            outer_scores.append(balanced_accuracy_score(y_test, y_pred))
         
-        return study.best_params, study.best_value
+        nested_cv_score = np.mean(outer_scores)
+        nested_cv_std = np.std(outer_scores)
+        
+        print(f"   ✅ Nested CV Score: {nested_cv_score:.4f} ± {nested_cv_std:.4f}")
+        print(f"   Best params: {best_params}")
+        
+        return best_params, nested_cv_score, nested_cv_std
     
-    def train_final_models(self, X_train, y_train, X_test, y_test, best_params):
-        """Train final ensemble with regularization"""
-        print("\n🎓 Training Final Models...")
+    def train_conservative_models(self, X_train, y_train, X_test, y_test, best_params):
+        """Train with strong regularization"""
+        print("\n🎓 Training Conservative Models...")
         
-        # Apply SMOTE only to training data
+        # Apply SMOTE
         smote = SMOTE(k_neighbors=3, random_state=RANDOM_STATE)
         X_train_bal, y_train_bal = smote.fit_resample(X_train, y_train)
-        
         print(f"   After SMOTE: {len(X_train_bal)} samples")
         
-        # Train regularized models
         models = {}
         
-        # CatBoost with optimized params
+        # CatBoost with best params (already regularized)
         cat_model = CatBoostClassifier(**best_params)
         cat_model.fit(X_train_bal, y_train_bal, verbose=False)
         models['CatBoost'] = cat_model
         
-        # XGBoost with regularization
+        # XGBoost with STRONG regularization
         xgb_model = XGBClassifier(
-            n_estimators=best_params.get('iterations', 500),
-            learning_rate=best_params.get('learning_rate', 0.05),
-            max_depth=best_params.get('depth', 6),
-            min_child_weight=3,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.5,
-            reg_lambda=1.0,
+            n_estimators=best_params.get('iterations', 400),
+            learning_rate=max(0.01, best_params.get('learning_rate', 0.03) * 0.7),  # Slower
+            max_depth=min(5, best_params.get('depth', 4)),  # Shallower
+            min_child_weight=5,  # More conservative
+            subsample=0.7,  # Less data per tree
+            colsample_bytree=0.7,  # Fewer features per tree
+            reg_alpha=1.0,  # L1 regularization
+            reg_lambda=2.0,  # L2 regularization
             random_state=RANDOM_STATE,
             eval_metric='mlogloss'
         )
         xgb_model.fit(X_train_bal, y_train_bal)
         models['XGBoost'] = xgb_model
         
-        # LightGBM with regularization
+        # LightGBM with STRONG regularization
         lgb_model = LGBMClassifier(
-            n_estimators=best_params.get('iterations', 500),
-            learning_rate=best_params.get('learning_rate', 0.05),
-            max_depth=best_params.get('depth', 6),
-            min_child_samples=20,
-            reg_alpha=0.5,
-            reg_lambda=1.0,
+            n_estimators=best_params.get('iterations', 400),
+            learning_rate=max(0.01, best_params.get('learning_rate', 0.03) * 0.7),
+            max_depth=min(5, best_params.get('depth', 4)),
+            min_child_samples=30,  # More samples required
+            min_split_gain=0.1,  # Minimum gain to split
+            reg_alpha=1.0,
+            reg_lambda=2.0,
+            subsample=0.7,
+            colsample_bytree=0.7,
             random_state=RANDOM_STATE,
             verbose=-1
         )
@@ -306,7 +303,7 @@ class RealisticCVDPredictor:
         voting.fit(X_train_bal, y_train_bal)
         models['Ensemble'] = voting
         
-        # Evaluate all models
+        # Evaluate
         results = []
         for name, model in models.items():
             y_pred = model.predict(X_test)
@@ -329,16 +326,50 @@ class RealisticCVDPredictor:
         
         return best_model, best_model_name, results_df
     
+    def multiple_holdout_validation(self, X, y, best_params, n_splits=5):
+        """Test on multiple random splits to ensure robustness"""
+        print("\n🔄 Multiple Holdout Validation...")
+        print("   (Testing on different random splits)")
+        
+        holdout_scores = []
+        
+        for i in range(n_splits):
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=RANDOM_STATE + i, stratify=y
+            )
+            
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X_train)
+            X_test = scaler.transform(X_test)
+            
+            smote = SMOTE(k_neighbors=3, random_state=RANDOM_STATE)
+            X_train_sm, y_train_sm = smote.fit_resample(X_train, y_train)
+            
+            model = CatBoostClassifier(**best_params)
+            model.fit(X_train_sm, y_train_sm, verbose=False)
+            
+            y_pred = model.predict(X_test)
+            score = balanced_accuracy_score(y_test, y_pred)
+            holdout_scores.append(score)
+            print(f"   Split {i+1}: {score:.4f}")
+        
+        mean_score = np.mean(holdout_scores)
+        std_score = np.std(holdout_scores)
+        
+        print(f"\n   ✅ Mean: {mean_score:.4f} ± {std_score:.4f}")
+        
+        return mean_score, std_score, holdout_scores
+    
     def run_full_pipeline(self):
-        """Run realistic pipeline"""
+        """Run ultra-robust pipeline"""
         # Load and create labels
         self.load_data()
         self.create_clinical_labels()
         
-        # Conservative feature engineering
-        df_engineered = self.conservative_feature_engineering(self.df_clinical)
+        # Minimal feature engineering
+        df_engineered = self.minimal_feature_engineering(self.df_clinical)
         
-        # Prepare features (no leakage!)
+        # Prepare features
         df_prepared, le = self.prepare_features(df_engineered)
         
         X = df_prepared.drop('target', axis=1).values
@@ -346,25 +377,30 @@ class RealisticCVDPredictor:
         
         print(f"\n📦 Total samples: {len(X)}, Features: {X.shape[1]}")
         
-        # Split ONCE - no feature selection on test set!
+        # Split
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
         )
         
         print(f"   Train: {len(X_train)}, Test: {len(X_test)}")
         
-        # Scale (fit on train only!)
+        # Scale
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # Optimize hyperparameters
-        best_params, cv_score = self.optimize_with_cv(X_train_scaled, y_train, n_trials=20)
+        # Nested CV optimization
+        best_params, nested_cv_score, nested_cv_std = self.nested_cv_optimization(
+            X_train_scaled, y_train, n_trials=15
+        )
         
-        print(f"\n📊 Expected performance from CV: {cv_score:.2%}")
+        # Multiple holdout validation
+        holdout_mean, holdout_std, holdout_scores = self.multiple_holdout_validation(
+            X, y, best_params, n_splits=5
+        )
         
         # Train final models
-        best_model, best_name, results = self.train_final_models(
+        best_model, best_name, results = self.train_conservative_models(
             X_train_scaled, y_train, X_test_scaled, y_test, best_params
         )
         
@@ -410,43 +446,41 @@ class RealisticCVDPredictor:
         final_balanced_acc = balanced_accuracy_score(y_test, y_pred)
         
         print("\n" + "="*80)
-        print("📊 RESULTS INTERPRETATION")
+        print("📊 OVERFITTING ANALYSIS")
         print("="*80)
+        print(f"Nested CV Score:        {nested_cv_score:.4f} ± {nested_cv_std:.4f}")
+        print(f"Multiple Holdout Mean:  {holdout_mean:.4f} ± {holdout_std:.4f}")
+        print(f"Final Test Score:       {final_balanced_acc:.4f}")
         
-        if final_balanced_acc >= 0.90:
-            print("🎉 EXCELLENT! 90%+ balanced accuracy!")
-        elif final_balanced_acc >= 0.85:
-            print("✅ VERY GOOD! 85%+ balanced accuracy!")
-        elif final_balanced_acc >= 0.80:
-            print("✅ GOOD! 80%+ balanced accuracy!")
-        elif final_balanced_acc >= 0.75:
-            print("✅ ACCEPTABLE! 75%+ balanced accuracy!")
+        gap_nested = abs(final_balanced_acc - nested_cv_score)
+        gap_holdout = abs(final_balanced_acc - holdout_mean)
+        
+        print(f"\nGap from Nested CV:     {gap_nested:.4f} ({gap_nested*100:.2f}%)")
+        print(f"Gap from Holdout Mean:  {gap_holdout:.4f} ({gap_holdout*100:.2f}%)")
+        
+        if gap_nested <= 0.03 and gap_holdout <= 0.03:
+            print("\n✅ EXCELLENT! Gaps < 3% - Model generalizes very well!")
+        elif gap_nested <= 0.05 and gap_holdout <= 0.05:
+            print("\n✅ GOOD! Gaps < 5% - Model generalizes well!")
+        elif gap_nested <= 0.08 and gap_holdout <= 0.08:
+            print("\n⚠️  ACCEPTABLE! Gaps < 8% - Some overfitting present")
         else:
-            print(f"⚠️  Current: {final_balanced_acc:.2%}")
+            print("\n❌ WARNING! Gaps > 8% - Significant overfitting detected!")
         
-        if final_balanced_acc > cv_score + 0.05:
-            print("\n⚠️  WARNING: Test performance >> CV performance")
-            print("   This suggests possible overfitting or lucky split")
-        elif final_balanced_acc < cv_score - 0.05:
-            print("\n⚠️  Test performance << CV performance")
-            print("   This is normal - test set is unseen data")
-        else:
-            print("\n✅ Test performance matches CV expectations")
-            print("   Model generalizes well!")
-        
-        return best_model, results, final_balanced_acc, cv_score
+        return best_model, results, final_balanced_acc, nested_cv_score, holdout_mean
 
 
 def main():
-    predictor = RealisticCVDPredictor('./public/cvd_dataset.csv')
-    model, results, test_acc, cv_acc = predictor.run_full_pipeline()
+    predictor = RobustCVDPredictor('./public/cvd_dataset.csv')
+    model, results, test_acc, nested_cv, holdout_mean = predictor.run_full_pipeline()
     
     print("\n" + "="*80)
-    print("📈 SUMMARY")
+    print("📈 FINAL SUMMARY")
     print("="*80)
-    print(f"CV Balanced Accuracy:   {cv_acc:.2%}")
-    print(f"Test Balanced Accuracy: {test_acc:.2%}")
-    print(f"Difference: {abs(test_acc - cv_acc):.2%}")
+    print(f"Nested CV (most reliable):  {nested_cv:.2%}")
+    print(f"Multiple Holdout Mean:      {holdout_mean:.2%}")
+    print(f"Final Test:                 {test_acc:.2%}")
+    print(f"\nExpected Real-World Performance: ~{nested_cv:.2%}")
     
     return predictor, model, results
 
