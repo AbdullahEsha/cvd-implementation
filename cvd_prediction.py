@@ -29,37 +29,20 @@ np.random.seed(RANDOM_STATE)
 
 # ----------------------------- Utilities ---------------------------------
 
-def safe_divide(numerator: pd.Series, denominator: pd.Series, floor: float = 1.0) -> pd.Series:
-    """
-    Safely divide series with a floor on the denominator to avoid division by zero.
-    
-    FIXED: Simplified to always use positive floor value.
-    For medical ratios like TC/HDL, negative denominators are data errors anyway.
-    
-    Args:
-        numerator: Numerator series
-        denominator: Denominator series  
-        floor: Minimum absolute value for denominator (default: 1.0 for HDL)
-    
-    Returns:
-        Series with safe division results
+def safe_divide(numerator: pd.Series, denominator: pd.Series, floor: float = 1e-2) -> pd.Series:
+    """Safely divide series with a floor on the denominator to avoid huge ratios.
+    floor is an absolute clinical floor (e.g., 1e-2) not percentile-based.
     """
     denom = denominator.copy().astype(float)
-    denom = denom.fillna(floor)  # Fill missing with floor
-    # Clip to minimum absolute value, preserving sign
-    denom = np.where(denom.abs() < floor, 
-                     floor * np.sign(denom).replace(0, 1),  # Handle sign=0 case
-                     denom)
+    denom = denom.fillna(0.0)
+    denom = denom.where(denom.abs() >= floor, floor * np.sign(denom) + floor)
     return numerator / denom
 
 
 # ---------------------- Risk scoring (train-only thresholds) ----------------
 class ClinicalRiskScorer:
-    """
-    Compute an additive, normalized risk score using clinically sensible weights.
+    """Compute an additive, normalized risk score using clinically sensible weights.
     Thresholds for LOW/INTERMEDIATE/HIGH are learned on training set only.
-    
-    FIXED: Added U-shaped BMI relationship
     """
     def __init__(self):
         self.low_thr = None
@@ -69,210 +52,119 @@ class ClinicalRiskScorer:
         n = len(df)
         score = np.zeros(n, dtype=float)
 
-        # Age effect (smooth weight, non-linear after 65)
+        # Age effect (smooth weight)
         if 'Age' in df.columns:
             a = df['Age'].fillna(df['Age'].median()).clip(18, 100)
-            # Moderate linear contribution up to 65, then steeper
-            score += np.where(a < 65, 
-                            ((a - 40) / 15).clip(0, 4),
-                            ((a - 40) / 12).clip(0, 5))  # Steeper after 65
+            score += ((a - 40) / 15).clip(0, 4)  # moderate linear contribution
 
-        # Systolic BP contribution (MAP-based)
+        # Systolic BP contribution (capped)
         if all(c in df.columns for c in ['Systolic BP', 'Diastolic BP']):
             sbp = df['Systolic BP'].fillna(df['Systolic BP'].median())
             dbp = df['Diastolic BP'].fillna(df['Diastolic BP'].median())
-            # Mean Arterial Pressure
+            # MAP surrogate
             map_ = dbp + (sbp - dbp) / 3.0
             score += ((map_ - 85) / 10).clip(0, 4)
 
-        # LDL (non-linear scaling)
+        # LDL
         if 'Estimated LDL (mg/dL)' in df.columns:
             ldl = df['Estimated LDL (mg/dL)'].fillna(df['Estimated LDL (mg/dL)'].median())
-            # More aggressive penalty for very high LDL
-            score += np.where(ldl >= 190,
-                            4.0,  # Very high risk
-                            ((ldl - 100) / 30).clip(0, 3.5))
+            score += ((ldl - 100) / 30).clip(0, 4)
 
-        # HDL protective (subtract for high HDL)
+        # HDL protective (subtract)
         if 'HDL (mg/dL)' in df.columns:
             hdl = df['HDL (mg/dL)'].fillna(df['HDL (mg/dL)'].median())
-            # Penalty for low HDL
-            score += np.where(hdl < 40, 2.5,
-                            np.where(hdl < 50, 1.0, 0.0))
-            # Bonus for high HDL
-            score -= np.where(hdl >= 60, 1.5, 0.0)
+            score -= ((60 - hdl) / 10).clip(0, 3)
 
-        # Triglycerides (staged)
+        # Triglycerides
         if 'Triglycerides (mg/dL)' in df.columns:
             tg = df['Triglycerides (mg/dL)'].fillna(df['Triglycerides (mg/dL)'].median())
-            score += np.where(tg >= 500, 3.5,
-                            np.where(tg >= 200, 2.0,
-                            np.where(tg >= 150, 1.0, 0.0)))
+            score += ((tg - 150) / 100).clip(0, 3)
 
-        # Diabetes (staged by glucose level)
+        # Diabetes
         if 'Fasting Blood Sugar (mg/dL)' in df.columns:
             fbs = df['Fasting Blood Sugar (mg/dL)'].fillna(df['Fasting Blood Sugar (mg/dL)'].median())
-            score += np.where(fbs >= 126, 3.5,  # Diabetes
-                            np.where(fbs >= 100, 1.5, 0.0))  # Prediabetes
+            score += np.where(fbs >= 126, 3.0, np.where(fbs >= 100, 1.0, 0.0))
 
-        # BMI (U-SHAPED RELATIONSHIP - FIXED)
+        # BMI
         if 'BMI' in df.columns:
             bmi = df['BMI'].fillna(df['BMI'].median())
-            
-            # Underweight risk (BMI < 18.5)
-            score += np.where(bmi < 18.5, 
-                            ((18.5 - bmi) / 2.0).clip(0, 2.0),
-                            0.0)
-            
-            # Overweight/obesity risk (BMI >= 25)
-            score += np.where(bmi >= 40, 3.5,  # Class III obesity
-                            np.where(bmi >= 35, 3.0,  # Class II obesity
-                            np.where(bmi >= 30, 2.0,  # Class I obesity
-                            np.where(bmi >= 25, 1.0, 0.0))))  # Overweight
+            score += ((bmi - 25) / 5).clip(0, 3)
 
-        # Smoking (high weight - established risk factor)
+        # Smoking
         if 'Smoking Status' in df.columns:
-            score += np.where(df['Smoking Status'].fillna('N') == 'Y', 3.0, 0.0)
+            score += np.where(df['Smoking Status'].fillna('N') == 'Y', 2.5, 0.0)
 
-        # Family history (genetic component)
+        # Family history
         if 'Family History of CVD' in df.columns:
-            score += np.where(df['Family History of CVD'].fillna('N') == 'Y', 2.0, 0.0)
+            score += np.where(df['Family History of CVD'].fillna('N') == 'Y', 1.5, 0.0)
 
         # Physical activity (protective)
         if 'Physical Activity Level' in df.columns:
-            pal = df['Physical Activity Level'].fillna('Moderate')
-            score -= np.where(pal == 'High', 1.5, 0.0)
-            score += np.where(pal == 'Low', 1.2, 0.0)
+            score -= np.where(df['Physical Activity Level'].fillna('Medium') == 'High', 1.0, 0.0)
+            score += np.where(df['Physical Activity Level'].fillna('Medium') == 'Low', 0.8, 0.0)
 
         return score
 
     def fit(self, df: pd.DataFrame):
-        """Learn thresholds from training data only"""
         raw = self.compute_raw_score(df)
-        # Learn tertiles on training set
+        # Learn low/high using tertiles on training set
         self.low_thr = np.percentile(raw, 33)
         self.high_thr = np.percentile(raw, 67)
         return self
 
     def transform(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
-        """Apply learned thresholds to create risk labels"""
         raw = self.compute_raw_score(df)
-        labels = np.where(raw <= self.low_thr, 'LOW', 
-                         np.where(raw <= self.high_thr, 'INTERMEDIATE', 'HIGH'))
+        labels = np.where(raw <= self.low_thr, 'LOW', np.where(raw <= self.high_thr, 'INTERMEDIATE', 'HIGH'))
         return df.copy(), labels
 
 
 # ----------------------- Feature engineering (train-safe) ------------------
 class FeatureEngineer:
-    """
-    Create robust and interpretable features.
+    """Create robust and interpretable features.
     All steps are deterministic and avoid dataset-global leaks.
-    
-    FIXED: Improved normalization and added clinical thresholds
     """
     def __init__(self):
-        self.hdl_floor = 20.0  # Clinical minimum for HDL (severe deficiency)
+        # store any train-based stats if needed
+        self.hdl_floor = 1.0  # absolute floor for HDL denominator
 
     def fit(self, X: pd.DataFrame, y=None):
-        # No global leaks; all transformations are deterministic
+        # No global leaks required; keep simple
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         df = X.copy()
 
-        # ============ LIPID RATIOS ============
+        # Lipid ratios
         if 'HDL (mg/dL)' in df.columns and 'Total Cholesterol (mg/dL)' in df.columns:
-            df['TC_HDL_Ratio'] = safe_divide(
-                df['Total Cholesterol (mg/dL)'], 
-                df['HDL (mg/dL)'], 
-                floor=self.hdl_floor
-            ).clip(1, 10)  # Clinical range
+            df['TC_HDL_Ratio'] = safe_divide(df['Total Cholesterol (mg/dL)'], df['HDL (mg/dL)'], floor=self.hdl_floor)
 
         if 'Estimated LDL (mg/dL)' in df.columns and 'HDL (mg/dL)' in df.columns:
-            df['LDL_HDL_Ratio'] = safe_divide(
-                df['Estimated LDL (mg/dL)'], 
-                df['HDL (mg/dL)'], 
-                floor=self.hdl_floor
-            ).clip(0.5, 8)  # Clinical range
+            df['LDL_HDL_Ratio'] = safe_divide(df['Estimated LDL (mg/dL)'], df['HDL (mg/dL)'], floor=self.hdl_floor)
 
         if 'Triglycerides (mg/dL)' in df.columns and 'HDL (mg/dL)' in df.columns:
-            # Atherogenic index
-            df['TG_HDL_Ratio'] = safe_divide(
-                df['Triglycerides (mg/dL)'], 
-                df['HDL (mg/dL)'], 
-                floor=self.hdl_floor
-            ).clip(0.5, 10)  # Clinical range
+            df['TG_HDL_Ratio'] = safe_divide(df['Triglycerides (mg/dL)'], df['HDL (mg/dL)'], floor=self.hdl_floor)
 
-        # Non-HDL cholesterol (validated CVD predictor)
+        # Non-HDL
         if 'Total Cholesterol (mg/dL)' in df.columns and 'HDL (mg/dL)' in df.columns:
-            df['Non_HDL_Chol'] = (df['Total Cholesterol (mg/dL)'] - df['HDL (mg/dL)']).clip(0, 300)
+            df['Non_HDL_Chol'] = df['Total Cholesterol (mg/dL)'] - df['HDL (mg/dL)']
 
-        # ============ BLOOD PRESSURE FEATURES ============
+        # Pulse pressure & MAP
         if 'Systolic BP' in df.columns and 'Diastolic BP' in df.columns:
-            # Pulse pressure (arterial stiffness marker)
-            df['Pulse_Pressure'] = (df['Systolic BP'] - df['Diastolic BP']).clip(20, 100)
-            
-            # Mean Arterial Pressure
+            df['Pulse_Pressure'] = (df['Systolic BP'] - df['Diastolic BP']).clip(lower=0)
             df['MAP'] = df['Diastolic BP'] + df['Pulse_Pressure'] / 3.0
-            
-            # Wide pulse pressure indicator (>60 is concerning)
-            df['Wide_Pulse_Pressure'] = (df['Pulse_Pressure'] > 60).astype(float)
 
-        # ============ AGE INTERACTIONS (NORMALIZED) ============
-        # FIXED: Properly normalized to prevent extreme values
-        
+        # Age-BMI, Age-SBP interactions (normalized by plausible clinical maxes)
         if 'Age' in df.columns and 'BMI' in df.columns:
-            # Normalize to [0, 1] approximately
-            age_norm = (df['Age'] / 100.0).clip(0, 1)
-            bmi_norm = (df['BMI'] / 50.0).clip(0, 1)
-            df['Age_BMI_Interaction'] = age_norm * bmi_norm
+            df['Age_BMI_Interaction'] = (df['Age'] / 100.0) * (df['BMI'] / 50.0)
 
         if 'Age' in df.columns and 'Systolic BP' in df.columns:
-            age_norm = (df['Age'] / 100.0).clip(0, 1)
-            sbp_norm = (df['Systolic BP'] / 200.0).clip(0, 1)
-            df['Age_SBP_Interaction'] = age_norm * sbp_norm
+            df['Age_SBP_Interaction'] = (df['Age'] / 100.0) * (df['Systolic BP'] / 200.0)
 
-        if 'Age' in df.columns and 'Total Cholesterol (mg/dL)' in df.columns:
-            age_norm = (df['Age'] / 100.0).clip(0, 1)
-            chol_norm = (df['Total Cholesterol (mg/dL)'] / 300.0).clip(0, 1.5)
-            df['Age_Chol_Interaction'] = age_norm * chol_norm
-
-        # ============ CLINICAL THRESHOLD FEATURES ============
-        
-        # BMI categories
+        # Simple bin features for BMI and Age
         if 'BMI' in df.columns:
-            df['BMI_Obese'] = (df['BMI'] >= 30).astype(float)
-            df['BMI_Overweight'] = ((df['BMI'] >= 25) & (df['BMI'] < 30)).astype(float)
-            df['BMI_Underweight'] = (df['BMI'] < 18.5).astype(float)
-        
-        # Age categories
+            df['BMI_Obese'] = (df['BMI'] >= 30).astype(int)
         if 'Age' in df.columns:
-            df['Age_65_plus'] = (df['Age'] >= 65).astype(float)
-            df['Age_55_64'] = ((df['Age'] >= 55) & (df['Age'] < 65)).astype(float)
-        
-        # LDL categories
-        if 'Estimated LDL (mg/dL)' in df.columns:
-            df['LDL_Very_High'] = (df['Estimated LDL (mg/dL)'] >= 190).astype(float)
-            df['LDL_High'] = ((df['Estimated LDL (mg/dL)'] >= 160) & 
-                             (df['Estimated LDL (mg/dL)'] < 190)).astype(float)
-        
-        # HDL categories
-        if 'HDL (mg/dL)' in df.columns:
-            df['HDL_Low'] = (df['HDL (mg/dL)'] < 40).astype(float)
-            df['HDL_Optimal'] = (df['HDL (mg/dL)'] >= 60).astype(float)
-        
-        # Blood pressure stages
-        if 'Systolic BP' in df.columns and 'Diastolic BP' in df.columns:
-            df['BP_Stage2_HTN'] = ((df['Systolic BP'] >= 140) | 
-                                   (df['Diastolic BP'] >= 90)).astype(float)
-            df['BP_Stage1_HTN'] = ((df['Systolic BP'] >= 130) & (df['Systolic BP'] < 140) | 
-                                   (df['Diastolic BP'] >= 80) & (df['Diastolic BP'] < 90)).astype(float)
-        
-        # Diabetes indicators
-        if 'Fasting Blood Sugar (mg/dL)' in df.columns:
-            df['Diabetes'] = (df['Fasting Blood Sugar (mg/dL)'] >= 126).astype(float)
-            df['Prediabetes'] = ((df['Fasting Blood Sugar (mg/dL)'] >= 100) & 
-                                (df['Fasting Blood Sugar (mg/dL)'] < 126)).astype(float)
+            df['Age_65_plus'] = (df['Age'] >= 65).astype(int)
 
         return df
 
@@ -283,9 +175,6 @@ class FeatureEngineer:
 
 # --------------------------- Main predictor class --------------------------
 class CVDModelPipeline:
-    """
-    FIXED: Corrected data leakage issues and mathematical errors
-    """
     def __init__(self, data_path: str):
         self.data_path = data_path
         self.df = None
@@ -297,57 +186,41 @@ class CVDModelPipeline:
         self.final_model = None
 
     def load_and_clean(self) -> pd.DataFrame:
-        """Load and perform basic cleaning"""
         df = pd.read_csv(self.data_path)
 
-        # Strip column names
+        # Basic cleaning: strip column names
         df.columns = [c.strip() for c in df.columns]
 
-        # Basic type conversion
+        # Impute basic missing values conservatively
         for col in df.columns:
             if df[col].dtype in ['float64', 'int64']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             else:
                 df[col] = df[col].astype(object)
 
+        # Small, robust imputations will be done in transformers/pipeline
         self.df = df
         return df
 
     def _choose_stratify_col(self, df: pd.DataFrame) -> Optional[pd.Series]:
-        """
-        FIXED: Use fixed value for imputation to prevent data leakage
-        """
+        # Prefer 'Age' buckets for stratification; fallback to categorical if present
         if 'Age' in df.columns:
-            # Use fixed value (50) instead of median to prevent leakage
-            return pd.cut(
-                df['Age'].fillna(50),  # FIXED: Use constant instead of median
-                bins=[0, 40, 55, 65, 200], 
-                labels=[0, 1, 2, 3]
-            )
-        # Fallback to categorical stratification
+            return pd.cut(df['Age'].fillna(df['Age'].median()), bins=[0,40,55,65,200], labels=[0,1,2,3])
         for c in ['Smoking Status', 'Family History of CVD', 'Physical Activity Level']:
             if c in df.columns:
-                return df[c].fillna('Unknown')
+                return df[c].fillna('M')
         return None
 
     def initial_split(self, test_size=0.2, random_state=RANDOM_STATE):
-        """Split data with stratification"""
         df = self.df.copy()
         strat = self._choose_stratify_col(df)
-        
         if strat is None:
-            train_df, test_df = train_test_split(
-                df, test_size=test_size, random_state=random_state
-            )
+            train_df, test_df = train_test_split(df, test_size=test_size, random_state=random_state)
         else:
-            train_df, test_df = train_test_split(
-                df, test_size=test_size, random_state=random_state, stratify=strat
-            )
-        
+            train_df, test_df = train_test_split(df, test_size=test_size, random_state=random_state, stratify=strat)
         return train_df.reset_index(drop=True), test_df.reset_index(drop=True)
 
     def prepare_and_train(self, test_size=0.2, random_state=RANDOM_STATE):
-        """Complete training pipeline"""
         df = self.load_and_clean()
         train_df, test_df = self.initial_split(test_size=test_size, random_state=random_state)
 
@@ -357,26 +230,19 @@ class CVDModelPipeline:
         test_df, y_test_labels = self.risk_scorer.transform(test_df)
 
         # Encode labels
-        label_map = {'LOW': 0, 'INTERMEDIATE': 1, 'HIGH': 2}
+        label_map = {lab: i for i, lab in enumerate(['LOW', 'INTERMEDIATE', 'HIGH'])}
         y_train = np.array([label_map[l] for l in y_train_labels])
         y_test = np.array([label_map[l] for l in y_test_labels])
 
-        print(f"\nTraining set distribution:")
-        print(pd.Series(y_train_labels).value_counts())
-        print(f"\nTest set distribution:")
-        print(pd.Series(y_test_labels).value_counts())
+        # Feature engineering
+        X_train = self.feature_engineer.fit_transform(train_df.drop(columns=[]))
+        X_test = self.feature_engineer.transform(test_df.drop(columns=[]))
 
-        # Feature engineering (fit on train, transform both)
-        X_train = self.feature_engineer.fit_transform(train_df)
-        X_test = self.feature_engineer.transform(test_df)
-
-        # Identify column types
+        # Identify numeric and categorical columns for pipeline
         self.numeric_cols = [c for c in X_train.columns if X_train[c].dtype in ['int64', 'float64']]
         self.cat_cols = [c for c in X_train.columns if X_train[c].dtype == 'object']
 
-        print(f"\nFeatures: {len(self.numeric_cols)} numeric, {len(self.cat_cols)} categorical")
-
-        # Build preprocessing pipeline
+        # Build preprocessing
         numeric_transformer = Pipeline(steps=[
             ('imputer', SimpleImputer(strategy='median')),
             ('scaler', StandardScaler())
@@ -392,157 +258,92 @@ class CVDModelPipeline:
             ('cat', categorical_transformer, self.cat_cols)
         ], remainder='drop')
 
-        # Base models
-        cat = CatBoostClassifier(
-            iterations=800,
-            learning_rate=0.05,
-            depth=6,
-            l2_leaf_reg=3,
-            verbose=False, 
-            random_state=RANDOM_STATE, 
-            auto_class_weights='Balanced'
-        )
-        
-        xgb = XGBClassifier(
-            n_estimators=800,
-            learning_rate=0.05,
-            max_depth=6,
-            min_child_weight=2,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.5,
-            reg_lambda=1.0,
-            eval_metric='mlogloss', 
-            random_state=RANDOM_STATE
-        )
-        
-        lgb = LGBMClassifier(
-            n_estimators=800,
-            learning_rate=0.05,
-            max_depth=6,
-            min_child_samples=20,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.5,
-            reg_lambda=1.0,
-            random_state=RANDOM_STATE,
-            verbose=-1
-        )
+        # Base learners
+        cat = CatBoostClassifier(verbose=False, random_state=RANDOM_STATE, auto_class_weights='Balanced')
+        xgb = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss', random_state=RANDOM_STATE)
+        lgb = LGBMClassifier(random_state=RANDOM_STATE)
 
-        # Stacking ensemble
+        # Create a stacking ensemble with logistic regression as final estimator
         estimators = [('cat', cat), ('xgb', xgb), ('lgb', lgb)]
 
         stacking = StackingClassifier(
             estimators=estimators,
-            final_estimator=LogisticRegression(
-                max_iter=1000, 
-                class_weight='balanced', 
-                random_state=RANDOM_STATE
-            ),
-            cv=5, 
-            n_jobs=-1, 
-            passthrough=False
+            final_estimator=LogisticRegression(max_iter=1000, class_weight='balanced', random_state=RANDOM_STATE),
+            cv=5, n_jobs=-1, passthrough=False
         )
 
-        # SMOTE validation - FIXED
-        def can_apply_smote(y: np.ndarray, k_neighbors: int = 5) -> bool:
-            """
-            FIXED: Check if SMOTE can be applied with given k_neighbors
-            """
+        # Full pipeline with optional resampling (apply SMOTE only if valid)
+        def can_apply_smote(y: np.ndarray) -> bool:
+            """SMOTE requires at least 2 minority examples and >1 classes."""
             unique, counts = np.unique(y, return_counts=True)
             if len(unique) < 2:
                 return False
-            # Need at least k_neighbors + 1 samples in minority class
-            if counts.min() <= k_neighbors:
+            if counts.min() <= 1:
                 return False
             return True
 
-        # Dynamically determine k_neighbors
-        min_class_count = np.bincount(y_train).min()
-        k_neighbors = min(5, max(1, min_class_count - 1))
-        
-        print(f"\nApplying SMOTE with k_neighbors={k_neighbors}")
-
-        if can_apply_smote(y_train, k_neighbors):
+        if can_apply_smote(y_train):
             pipeline = ImbPipeline(steps=[
                 ('pre', preprocessor),
-                ('smote', SMOTE(k_neighbors=k_neighbors, random_state=RANDOM_STATE)),
-                ('sel', SelectFromModel(
-                    RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE), 
-                    threshold='median'
-                )),
+                ('smote', SMOTE(random_state=RANDOM_STATE)),
+                ('sel', SelectFromModel(RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE), threshold='median')),
                 ('clf', stacking)
             ])
         else:
-            print("⚠️  SMOTE skipped - insufficient samples")
             pipeline = Pipeline(steps=[
                 ('pre', preprocessor),
-                ('sel', SelectFromModel(
-                    RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE), 
-                    threshold='median'
-                )),
+                ('sel', SelectFromModel(RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE), threshold='median')),
                 ('clf', stacking)
             ])
 
-        # Train model
-        print('\nTraining stacked ensemble...')
+        # Fit pipeline
+        print('\nTraining model pipeline...')
         pipeline.fit(X_train, y_train)
         self.final_model = pipeline
 
         # Evaluate
-        y_pred = pipeline.predict(X_test)
+        X_test_pre = X_test
+        y_pred = pipeline.predict(X_test_pre)
         bal_acc = balanced_accuracy_score(y_test, y_pred)
         acc = accuracy_score(y_test, y_pred)
         f1 = f1_score(y_test, y_pred, average='weighted')
 
-        print("\n" + "="*80)
-        print("📊 FINAL RESULTS")
-        print("="*80)
-        print(f'Balanced Accuracy: {bal_acc:.4f} ({bal_acc*100:.2f}%)')
-        print(f'Accuracy:          {acc:.4f} ({acc*100:.2f}%)')
-        print(f'F1 Score:          {f1:.4f}')
-        
-        print('\n📋 Classification Report:')
+        print(f'Balanced Accuracy: {bal_acc:.4f}')
+        print(f'Accuracy: {acc:.4f}')
+        print(f'F1 (weighted): {f1:.4f}')
+        print('\nClassification Report:')
         print(classification_report(y_test, y_pred, target_names=['LOW','INTERMEDIATE','HIGH']))
-        
-        print('\n📊 Confusion Matrix:')
-        cm = confusion_matrix(y_test, y_pred)
-        print(cm)
 
-        return pipeline, (X_train, y_train), (X_test, y_test), {
-            'bal_acc': bal_acc, 
-            'acc': acc, 
-            'f1': f1
-        }
+        self.feature_names_ = self._get_feature_names_from_preprocessor(pipeline.named_steps['pre'])
+        return pipeline, (X_train, y_train), (X_test, y_test), {'bal_acc': bal_acc, 'acc': acc, 'f1': f1}
+
+    def _get_feature_names_from_preprocessor(self, preprocessor: ColumnTransformer) -> List[str]:
+        names: List[str] = []
+        for name, trans, cols in preprocessor.transformers_:
+            if name == 'remainder':
+                continue
+            if hasattr(trans, 'named_steps') and 'onehot' in trans.named_steps:
+                o = trans.named_steps['onehot']
+                cats = o.categories_
+                for i, c in enumerate(cols):
+                    for val in cats[i]:
+                        names.append(f'{c}__{val}')
+            else:
+                names.extend(list(cols))
+        return names
 
 
 # ------------------------------ Execution ---------------------------------
 
 def main():
-    DATA_PATH = './public/cvd_dataset.csv'
-    
-    print("="*80)
-    print("🏥 CVD RISK PREDICTOR - MATHEMATICALLY CORRECTED VERSION")
-    print("="*80)
-    print("\n✅ All mathematical errors fixed:")
-    print("   • U-shaped BMI risk relationship")
-    print("   • Improved safe_divide with proper floor handling")
-    print("   • Fixed stratification to prevent data leakage")
-    print("   • Dynamic SMOTE k_neighbors validation")
-    print("   • Normalized age interactions")
-    print("   • Clinical threshold features")
-    print("\n" + "="*80 + "\n")
-    
+    DATA_PATH = './public/cvd_dataset.csv'  # update if needed
     model = CVDModelPipeline(DATA_PATH)
     pipeline, train_data, test_data, metrics = model.prepare_and_train(test_size=0.2)
 
-    print('\n' + "="*80)
-    print('✅ TRAINING COMPLETE')
-    print("="*80)
-    print(f"Final Balanced Accuracy: {metrics['bal_acc']*100:.2f}%")
-    
-    return model, pipeline, metrics
+    print('\nDone. Metrics:')
+    print(metrics)
+    return model, pipeline
 
 
 if __name__ == '__main__':
-    model, pipeline, metrics = main()
+    main()
