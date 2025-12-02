@@ -37,7 +37,7 @@ from datetime import datetime
 RANDOM_STATE = 42
 np.random.seed(RANDOM_STATE)
 
-OUTPUT_DIR = './cvd_results'
+OUTPUT_DIR = './cvd_results_old_' + datetime.now().strftime('%Y%m%d_%H%M%S')
 os. makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ----------------------------- Utilities ---------------------------------

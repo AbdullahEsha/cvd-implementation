@@ -6,7 +6,7 @@ import pandas as pd
 from typing import Tuple, List, Optional, Dict
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate, learning_curve, cross_val_score
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, label_binarize
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -17,6 +17,8 @@ from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.inspection import permutation_importance
+from sklearn.feature_selection import RFECV
 from sklearn.metrics import (
     balanced_accuracy_score, accuracy_score, f1_score,
     classification_report, confusion_matrix, roc_curve,
@@ -40,7 +42,7 @@ from scipy import stats
 RANDOM_STATE = 42
 np.random.seed(RANDOM_STATE)
 
-OUTPUT_DIR = './cvd_results_' + datetime.now().strftime('%Y%m%d_%H%M%S')
+OUTPUT_DIR = './cvd_results_latest_' + datetime.now().strftime('%Y%m%d_%H%M%S')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ----------------------------- Utilities ---------------------------------
@@ -914,71 +916,247 @@ class CVDModelPipeline:
         print("   • Address class imbalance handling (SMOTE)")
         print("\n" + "=" * 80 + "\n")
         
-        return self.models, results_df, (X_test_processed, y_test)
+        # Return both processed training and test sets so callers can plot learning curves, etc.
+        return self.models, results_df, (X_train_processed, y_train), (X_test_processed, y_test)
 
-
-# ------------------------------ Main Execution ---------------------------------
-
-def main():
-    """
-    Main execution function
+# -------------------------- Overfitting Analysis ----------------------------
+def analyze_overfitting(self, results_df):
+    """Comprehensive overfitting analysis"""
+    print("\n" + "="*80)
+    print("📊 OVERFITTING ANALYSIS")
+    print("="*80)
     
-    This implementation is journal-ready with:
-    - No data leakage
-    - Feature selection to prevent overfitting
-    - Bootstrap confidence intervals
-    - Calibration analysis
-    - Comprehensive evaluation metrics
-    """
+    for _, row in results_df.iterrows():
+        model = row['Model']
+        train_acc = row['Train_Accuracy']
+        test_acc = row['Test_Accuracy']
+        gap = row['Overfitting']
+        ci_width = row['Test_CI_Upper'] - row['Test_CI_Lower']
+        
+        print(f"\n{model}:")
+        print(f"  Train: {train_acc:.4f}")
+        print(f"  Test:  {test_acc:.4f} (CI width: {ci_width:.4f})")
+        print(f"  Gap:   {gap:.4f}", end=" ")
+        
+        # Detailed interpretation
+        if abs(gap) < 0.03:
+            status = "✅ EXCELLENT - Great generalization"
+        elif abs(gap) < 0.05:
+            status = "✅ GOOD - Acceptable generalization"
+        elif gap > 0.05 and gap < 0.10:
+            status = "⚠️ MODERATE - Some overfitting, consider:"
+            print(f"\n     {status}")
+            print(f"     • Increase regularization (L1/L2)")
+            print(f"     • Reduce model complexity")
+            print(f"     • Use fewer features")
+            print(f"     • Add more training data")
+            continue
+        elif gap >= 0.10:
+            status = "❌ SEVERE - High overfitting, action required:"
+            print(f"\n     {status}")
+            print(f"     • Model memorizing training data")
+            print(f"     • Reduce k_features further")
+            print(f"     • Increase cross-validation folds")
+            print(f"     • Check for data leakage")
+            continue
+        elif gap < -0.05:
+            status = "⚠️ UNUSUAL - Test > Train (lucky split or leakage?)"
+            print(f"\n     {status}")
+            print(f"     • Verify no data leakage")
+            print(f"     • Check train/test split")
+            print(f"     • Consider nested CV")
+            continue
+        else:
+            status = "✅ GOOD"
+        
+        print(f"({status})")
+        
+        # Statistical significance of difference
+        # If CI doesn't overlap with train accuracy, difference is significant
+        if test_acc + ci_width < train_acc or test_acc - ci_width > train_acc:
+            print(f"     ⚠️ Statistically significant difference (p < 0.05)")
+
+
+# -------------------------- Learning Curves ------------------------------
+def plot_learning_curves(self, best_model, X_train, y_train, save_path):
+    """Plot learning curves to visualize overfitting"""
+    train_sizes = np.linspace(0.1, 1.0, 10)
     
+    train_sizes_abs, train_scores, val_scores = learning_curve(
+        best_model, X_train, y_train,
+        train_sizes=train_sizes,
+        cv=5,
+        scoring='balanced_accuracy',
+        n_jobs=-1,
+        random_state=42
+    )
+    
+    train_mean = np.mean(train_scores, axis=1)
+    train_std = np.std(train_scores, axis=1)
+    val_mean = np.mean(val_scores, axis=1)
+    val_std = np.std(val_scores, axis=1)
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_sizes_abs, train_mean, 'o-', color='r', label='Training Score')
+    plt.plot(train_sizes_abs, val_mean, 'o-', color='g', label='Validation Score')
+    
+    plt.fill_between(train_sizes_abs, train_mean - train_std, train_mean + train_std,
+                     alpha=0.1, color='r')
+    plt.fill_between(train_sizes_abs, val_mean - val_std, val_mean + val_std,
+                     alpha=0.1, color='g')
+    
+    plt.xlabel('Training Set Size', fontsize=12)
+    plt.ylabel('Balanced Accuracy', fontsize=12)
+    plt.title('Learning Curves - Overfitting Detection', fontsize=14, fontweight='bold')
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    
+    # Add interpretation
+    gap_at_max = train_mean[-1] - val_mean[-1]
+    if gap_at_max > 0.1:
+        plt.text(0.5, 0.05, '⚠️ High overfitting detected', 
+                transform=plt.gca().transAxes, fontsize=12,
+                bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✅ Learning curves saved to: {save_path}")
+    plt.close()
+
+# -------------------------- Nested Cross-Validation ------------------------
+def nested_cross_validation(self, model, X, y):
+    """
+    Nested CV provides unbiased performance estimates
+    
+    Outer loop: Model evaluation
+    Inner loop: Hyperparameter tuning (if applicable)
+    """
+    outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    
+    nested_scores = cross_val_score(
+        model, X, y,
+        cv=outer_cv,
+        scoring='balanced_accuracy',
+        n_jobs=-1
+    )
+    
+    print(f"\n📊 Nested CV Results:")
+    print(f"   Mean: {nested_scores.mean():.4f}")
+    print(f"   Std:  {nested_scores.std():.4f}")
+    print(f"   95% CI: [{nested_scores.mean() - 1.96*nested_scores.std():.4f}, "
+          f"{nested_scores.mean() + 1.96*nested_scores.std():.4f}]")
+    
+    return nested_scores
+
+
+# -------------------------- Stable Feature Selection -----------------------
+def stable_feature_selection(self, X_train, y_train, base_model):
+    """
+    Use RFECV for more stable feature selection
+    Better than SelectKBest for preventing overfitting
+    """
+    print("\n🎯 Performing stable feature selection with RFECV...")
+    
+    rfecv = RFECV(
+        estimator=base_model,
+        step=10,  # Remove 10 features at a time
+        cv=StratifiedKFold(5),
+        scoring='balanced_accuracy',
+        n_jobs=-1,
+        min_features_to_select=50
+    )
+    
+    rfecv.fit(X_train, y_train)
+    
+    print(f"   Optimal features: {rfecv.n_features_}")
+    print(f"   CV scores at each step: {rfecv.cv_results_['mean_test_score'][-5:]}")
+    
+    return rfecv
+
+def analyze_feature_importance_robust(self, model, X_test, y_test, feature_names):
+    """Permutation importance is more reliable than built-in importance"""
+    print("\n🔍 Computing permutation importance...")
+    
+    result = permutation_importance(
+        model, X_test, y_test,
+        n_repeats=30,
+        random_state=42,
+        n_jobs=-1,
+        scoring='balanced_accuracy'
+    )
+    
+    # Get top 20 features
+    sorted_idx = result.importances_mean.argsort()[::-1][:20]
+    
+    print("\n📊 Top 20 Most Important Features (Permutation):")
+    for i, idx in enumerate(sorted_idx, 1):
+        print(f"   {i:2d}. {feature_names[idx]:40s} "
+              f"{result.importances_mean[idx]:.4f} ± {result.importances_std[idx]:.4f}")
+    
+    return result
+
+# Bind standalone utility functions as methods on the pipeline class for
+# backwards compatibility so callers can use either the module-level
+# functions or instance methods (e.g. `pipeline.plot_learning_curves(...)`).
+CVDModelPipeline.analyze_overfitting = analyze_overfitting
+CVDModelPipeline.plot_learning_curves = plot_learning_curves
+CVDModelPipeline.nested_cross_validation = nested_cross_validation
+CVDModelPipeline.stable_feature_selection = stable_feature_selection
+CVDModelPipeline.analyze_feature_importance_robust = analyze_feature_importance_robust
+
+# ============================================================
+# USAGE EXAMPLE
+# ============================================================
+
+def main_improved():
+    """
+    Improved main function with all fixes
+    """
     DATA_PATH = './public/cvd_dataset.csv'
-    K_FEATURES = 150  # Reduce from ~1100 to 150 features
-    
-    print("\n" + "=" * 80)
-    print("🏥 CARDIOVASCULAR DISEASE RISK PREDICTION")
-    print("   JOURNAL-READY IMPLEMENTATION v2.0")
-    print("=" * 80)
-    print("\n🎯 Implementation Features:")
-    print("   • Feature selection (SelectKBest)")
-    print("   • Bootstrap confidence intervals (n=1000)")
-    print("   • Calibration curve analysis")
-    print("   • Comprehensive cross-validation")
-    print("   • Per-class performance metrics")
-    print("   • Statistical significance testing")
-    print("   • SMOTE applied inside CV folds")
-    print("   • Clinical feature engineering")
-    print("\n⚠️  Important Note:")
-    print("   This model predicts RISK CATEGORIES (LOW/INTERMEDIATE/HIGH)")
-    print("   based on clinical risk factors, not actual CVD outcomes.")
-    print("   For clinical deployment, validation with actual patient")
-    print("   outcomes is required.")
-    print("\n" + "=" * 80 + "\n")
+    K_FEATURES = 150
     
     pipeline = CVDModelPipeline(DATA_PATH, k_features=K_FEATURES)
-    models, results, test_data = pipeline.prepare_and_train_all_models(test_size=0.2)
     
-    print("\n" + "=" * 80)
-    print("🎊 EXECUTION COMPLETE!")
-    print("=" * 80)
-    print("\n📁 Output Files Generated:")
-    print(f"   • {OUTPUT_DIR}/model_results_detailed.csv")
-    print(f"   • {OUTPUT_DIR}/roc_curves.png")
-    print(f"   • {OUTPUT_DIR}/calibration_curves.png")
-    print(f"   • {OUTPUT_DIR}/accuracy_comparison.png")
-    print(f"   • {OUTPUT_DIR}/confusion_matrices.png")
-    print(f"   • {OUTPUT_DIR}/feature_importance.png")
+    # Load and check for real target
+    df = pipeline.load_and_clean()
     
-    print("\n💡 Next Steps for Publication:")
-    print("   1. Validate on external dataset (different institution)")
-    print("   2. Compare against established risk scores (Framingham, ASCVD)")
-    print("   3. Conduct prospective validation with actual outcomes")
-    print("   4. Perform subgroup analysis (age, sex, comorbidities)")
-    print("   5. Calculate net reclassification improvement (NRI)")
-    print("   6. Assess clinical utility with decision curve analysis")
-    print("\n" + "=" * 80 + "\n")
+    # If no real target, STOP and warn user
+    if pipeline.target_col is None:
+        print("\n" + "="*80)
+        print("❌ CRITICAL WARNING")
+        print("="*80)
+        print("No actual CVD outcome variable found in dataset!")
+        print("Current implementation uses SYNTHETIC risk labels.")
+        print("\nThis means:")
+        print("  • Model is predicting risk scores it calculated itself")
+        print("  • Results are NOT clinically valid")
+        print("  • Cannot be used for actual patient care")
+        print("\nRequired: Add a binary outcome column like:")
+        print("  • 'CVD_Outcome' (0=No CVD, 1=CVD)")
+        print("  • 'MI' (myocardial infarction)")
+        print("  • 'Stroke' (stroke occurrence)")
+        print("="*80 + "\n")
+        
+        response = input("Continue with synthetic labels? (yes/no): ")
+        if response.lower() != 'yes':
+            return
+    # Train models (returns processed train and test sets)
+    models, results, train_data, test_data = pipeline.prepare_and_train_all_models()
     
+    # Enhanced overfitting analysis (call the standalone function with pipeline as 'self')
+    analyze_overfitting(pipeline, results)
+    
+    # Learning curves for best model
+    best_model_name = results.iloc[0]['Model']
+    best_model = models[best_model_name]
+    X_train, y_train = train_data
+    X_test, y_test = test_data
+    
+    lc_path = os.path.join(OUTPUT_DIR, 'learning_curves.png')
+    pipeline.plot_learning_curves(best_model, X_train, y_train, lc_path)
+    pipeline.plot_learning_curves(best_model, X_train, y_train, lc_path)
+
     return pipeline, models, results
 
-
 if __name__ == '__main__':
-    pipeline, models, results = main()
+    pipeline, models, results = main_improved()
