@@ -1,3 +1,9 @@
+### Setting up the Virtual Environment (.venv)
+
+```bash
+python3 -m venv .venv
+```
+
 ## Activating the Virtual Environment
 
 - Windows:
