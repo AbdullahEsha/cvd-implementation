@@ -232,14 +232,15 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
 # ---------------- Plotting helpers ----------------
 def plot_roc_curves(models_dict: Dict, X_test, y_test, class_names: List[str], save_path: str):
     """
-    Plot ROC curves for each class in vertical layout.
+    Plot ROC curves for each class in vertical layout with enhanced font sizes for papers.
     One subplot per class, stacked vertically.
     """
     n_classes = len(class_names)
     y_test_bin = label_binarize(y_test, classes=list(range(n_classes)))
     
     # Create vertical subplots: n_classes rows, 1 column
-    fig, axes = plt.subplots(n_classes, 1, figsize=(8, 5 * n_classes))
+    # Increased figure size for better visibility
+    fig, axes = plt.subplots(n_classes, 1, figsize=(10, 6 * n_classes))
     
     # Generate colors for different models
     colors = plt.cm.tab10(np.linspace(0, 1, max(1, len(models_dict))))
@@ -268,24 +269,39 @@ def plot_roc_curves(models_dict: Dict, X_test, y_test, class_names: List[str], s
                 fpr, tpr, _ = roc_curve(y_test_bin[:, ci], y_score)
                 roc_auc = auc(fpr, tpr)
                 
-                # Plot
-                ax.plot(fpr, tpr, color=color, lw=2, 
-                       label=f'{mname} (AUC={roc_auc:.3f})')
+                # Plot with thicker lines
+                ax.plot(fpr, tpr, color=color, lw=2.5, 
+                       label=f'{mname} (AUC={roc_auc:.3f}')
             except Exception as e:
                 print(f"Warning: Could not plot ROC for {mname}, class {ci}: {e}")
                 continue
         
         # Plot diagonal reference line
-        ax.plot([0, 1], [0, 1], 'k--', lw=1, label='Random (AUC=0.500)')
+        ax.plot([0, 1], [0, 1], 'k--', lw=2, label='Random (AUC=0.500)')
         
-        # Labels and formatting
-        ax.set_xlabel('False Positive Rate', fontsize=10)
-        ax.set_ylabel('True Positive Rate', fontsize=10)
-        ax.set_title(f'ROC Curve - {class_names[ci]}', fontsize=12, fontweight='bold')
-        ax.legend(loc='lower right', fontsize=8)
-        ax.grid(True, alpha=0.3)
+        # Enhanced labels and formatting for conference paper
+        ax.set_xlabel('False Positive Rate', fontsize=16, fontweight='bold')
+        ax.set_ylabel('True Positive Rate', fontsize=16, fontweight='bold')
+        ax.set_title(f'ROC Curve - {class_names[ci]}', fontsize=18, fontweight='bold', pad=15)
+        
+        # Larger legend with bold font
+        ax.legend(loc='lower right', fontsize=13, frameon=True, shadow=True, 
+                 prop={'weight': 'bold'})
+        
+        # Enhanced grid and tick labels
+        ax.grid(True, alpha=0.3, linewidth=1.2)
+        ax.tick_params(axis='both', which='major', labelsize=14, width=1.5, length=6)
+        
+        # Make tick labels bold
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_fontweight('bold')
+        
         ax.set_xlim([0.0, 1.0])
         ax.set_ylim([0.0, 1.05])
+        
+        # Thicker spines (borders)
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.5)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
